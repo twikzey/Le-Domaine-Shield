@@ -1,227 +1,152 @@
-const ytdl = require("ytdl-core-discord");
-const scdl = require("soundcloud-downloader").default;
-const { canModifyQueue, STAY_TIME } = require("../util/Util");
 const i18n = require("../util/i18n");
+const { play } = require("../include/play");
+const ytdl = require("ytdl-core");
+const YouTubeAPI = require("simple-youtube-api");
+const scdl = require("soundcloud-downloader").default;
+const https = require("https");
+const { YOUTUBE_API_KEY, SOUNDCLOUD_CLIENT_ID, DEFAULT_VOLUME } = require("../util/Util");
+const youtube = new YouTubeAPI(YOUTUBE_API_KEY);
 
 module.exports = {
-  async play(song, message, silent = false) {
-    const { SOUNDCLOUD_CLIENT_ID } = require("../util/Util");
+  name: "play",
+  cooldown: 3,
+  aliases: ["p"],
+  description: i18n.__("play.description"),
+  async execute(message, args) {
+    const { channel } = message.member.voice;
 
-    let config;
+    const serverQueue = message.client.queue.get(message.guild.id);
 
-    try {
-      config = require("../config.json");
-    } catch (error) {
-      config = null;
+    if (!channel) return message.reply(i18n.__("play.errorNotChannel")).catch(console.error);
+
+    if (serverQueue && channel !== message.guild.me.voice.channel)
+      return message
+        .reply(i18n.__mf("play.errorNotInSameChannel", { user: message.client.user }))
+        .catch(console.error);
+
+    if (!args.length)
+      return message
+        .reply(i18n.__mf("play.usageReply", { prefix: message.client.prefix }))
+        .catch(console.error);
+
+    const permissions = channel.permissionsFor(message.client.user);
+    if (!permissions.has("CONNECT")) return message.reply(i18n.__("play.missingPermissionConnect"));
+    if (!permissions.has("SPEAK")) return message.reply(i18n.__("play.missingPermissionSpeak"));
+
+    const search = args.join(" ");
+    const videoPattern = /^(https?:\/\/)?(www\.)?(m\.|music\.)?(youtube\.com|youtu\.?be)\/.+$/gi;
+    const playlistPattern = /^.*(list=)([^#\&\?]*).*/gi;
+    const scRegex = /^https?:\/\/(soundcloud\.com)\/(.*)$/;
+    const mobileScRegex = /^https?:\/\/(soundcloud\.app\.goo\.gl)\/(.*)$/;
+    const url = args[0];
+    const urlValid = videoPattern.test(args[0]);
+
+    // Start the playlist if playlist url was provided
+    if (!videoPattern.test(args[0]) && playlistPattern.test(args[0])) {
+      return message.client.commands.get("playlist").execute(message, args);
+    } else if (scdl.isValidUrl(url) && url.includes("/sets/")) {
+      return message.client.commands.get("playlist").execute(message, args);
     }
 
-    const PRUNING = config ? config.PRUNING : process.env.PRUNING;
-
-    const queue = message.client.queue.get(message.guild.id);
-
-    if (!song) {
-      setTimeout(function () {
-        if (queue.connection.dispatcher && message.guild.me.voice.channel) return;
-        queue.channel.leave();
-        !PRUNING && queue.textChannel.send(i18n.__("play.leaveChannel"));
-      }, STAY_TIME * 1000);
-      !PRUNING && queue.textChannel.send(i18n.__("play.queueEnded")).catch(console.error);
-      return message.client.queue.delete(message.guild.id);
-    }
-
-    let stream = null;
-    let streamType = song.url.includes("youtube.com") ? "opus" : "ogg/opus";
-
-    try {
-      if (song.url.includes("youtube.com")) {
-        stream = await ytdl(song.url, { highWaterMark: 1 << 25 });
-      } else if (song.url.includes("soundcloud.com")) {
-        try {
-          stream = await scdl.downloadFormat(song.url, scdl.FORMATS.OPUS, SOUNDCLOUD_CLIENT_ID);
-        } catch (error) {
-          stream = await scdl.downloadFormat(song.url, scdl.FORMATS.MP3, SOUNDCLOUD_CLIENT_ID);
-          streamType = "unknown";
-        }
-      }
-    } catch (error) {
-      if (queue) {
-        queue.songs.shift();
-        module.exports.play(queue.songs[0], message);
-      }
-
-      console.error(error);
-      return message.channel.send(
-        i18n.__mf("play.queueError", { error: error.message ? error.message : error })
-      );
-    }
-
-    queue.connection.on("disconnect", () => message.client.queue.delete(message.guild.id));
-
-    const dispatcher = queue.connection
-      .play(stream, { type: streamType })
-      .on("finish", () => {
-        if (collector && !collector.ended) collector.stop();
-
-        queue.connection.removeAllListeners("disconnect");
-
-        if (queue.loop && queue.songs.length > 0) {
-          // if loop is on, push the song back at the end of the queue
-          // so it can repeat endlessly
-          let lastSong = queue.songs.shift();
-          queue.songs.push(lastSong);
-          module.exports.play(queue.songs[0], message, queue.songs[0].url == lastSong.url);
-        } else {
-          // Recursively play the next song
-          queue.songs.shift();
-          module.exports.play(queue.songs[0], message);
-        }
-      })
-      .on("error", (err) => {
-        console.error(err);
-        queue.songs.shift();
-        module.exports.play(queue.songs[0], message);
-      });
-    dispatcher.setVolumeLogarithmic(queue.volume / 100);
-
-    if (!silent) {
+    if (mobileScRegex.test(url)) {
       try {
-        var playingMessage = await queue.textChannel.send(
-          i18n.__mf("play.startedPlaying", { title: song.title, url: song.url })
-        );
-        await playingMessage.react("⏭");
-        await playingMessage.react("⏯");
-        await playingMessage.react("🔇");
-        await playingMessage.react("🔉");
-        await playingMessage.react("🔊");
-        await playingMessage.react("🔁");
-        await playingMessage.react("🔀");
-        await playingMessage.react("⏹");
+        https.get(url, function (res) {
+          if (res.statusCode == "302") {
+            return message.client.commands.get("play").execute(message, [res.headers.location]);
+          } else {
+            return message.reply(i18n.__("play.songNotFound")).catch(console.error);
+          }
+        });
       } catch (error) {
         console.error(error);
+        return message.reply(error.message).catch(console.error);
       }
+      return message.reply("Following url redirection...").catch(console.error);
+    }
 
-      const filter = (reaction, user) => user.id !== message.client.user.id;
-      var collector = playingMessage.createReactionCollector(filter, {
-        time: song.duration > 0 ? song.duration * 1000 : 600000
-      });
+    const queueConstruct = {
+      textChannel: message.channel,
+      channel,
+      connection: null,
+      songs: [],
+      loop: false,
+      volume: DEFAULT_VOLUME,
+      muted: false,
+      playing: true
+    };
 
-      collector.on("collect", (reaction, user) => {
-        if (!queue) return;
-        const member = message.guild.member(user);
+    let songInfo = null;
+    let song = null;
 
-        switch (reaction.emoji.name) {
-          case "⏭":
-            queue.playing = true;
-            reaction.users.remove(user).catch(console.error);
-            if (!canModifyQueue(member)) return i18n.__("common.errorNotChannel");
-            queue.connection.dispatcher.end();
-            queue.textChannel.send(i18n.__mf("play.skipSong", { author: user })).catch(console.error);
-            collector.stop();
-            break;
+    if (urlValid) {
+      try {
+        songInfo = await ytdl.getInfo(url);
+        song = {
+          title: songInfo.videoDetails.title,
+          url: songInfo.videoDetails.video_url,
+          duration: songInfo.videoDetails.lengthSeconds
+        };
+      } catch (error) {
+        console.error(error);
+        return message.reply(error.message).catch(console.error);
+      }
+    } else if (scRegex.test(url)) {
+      try {
+        const trackInfo = await scdl.getInfo(url, SOUNDCLOUD_CLIENT_ID);
+        song = {
+          title: trackInfo.title,
+          url: trackInfo.permalink_url,
+          duration: Math.ceil(trackInfo.duration / 1000)
+        };
+      } catch (error) {
+        console.error(error);
+        return message.reply(error.message).catch(console.error);
+      }
+    } else {
+      try {
+        const results = await youtube.searchVideos(search, 1, { part: "id" });
 
-          case "⏯":
-            reaction.users.remove(user).catch(console.error);
-            if (!canModifyQueue(member)) return i18n.__("common.errorNotChannel");
-            if (queue.playing) {
-              queue.playing = !queue.playing;
-              queue.connection.dispatcher.pause(true);
-              queue.textChannel.send(i18n.__mf("play.pauseSong", { author: user })).catch(console.error);
-            } else {
-              queue.playing = !queue.playing;
-              queue.connection.dispatcher.resume();
-              queue.textChannel.send(i18n.__mf("play.resumeSong", { author: user })).catch(console.error);
-            }
-            break;
-
-          case "🔇":
-            reaction.users.remove(user).catch(console.error);
-            if (!canModifyQueue(member)) return i18n.__("common.errorNotChannel");
-            queue.muted = !queue.muted;
-            if (queue.muted) {
-              queue.connection.dispatcher.setVolumeLogarithmic(0);
-              queue.textChannel.send(i18n.__mf("play.mutedSong", { author: user })).catch(console.error);
-            } else {
-              queue.connection.dispatcher.setVolumeLogarithmic(queue.volume / 100);
-              queue.textChannel.send(i18n.__mf("play.unmutedSong", { author: user })).catch(console.error);
-            }
-            break;
-
-          case "🔉":
-            reaction.users.remove(user).catch(console.error);
-            if (queue.volume == 0) return;
-            if (!canModifyQueue(member)) return i18n.__("common.errorNotChannel");
-            queue.volume = Math.max(queue.volume - 10, 0);
-            queue.connection.dispatcher.setVolumeLogarithmic(queue.volume / 100);
-            queue.textChannel
-              .send(i18n.__mf("play.decreasedVolume", { author: user, volume: queue.volume }))
-              .catch(console.error);
-            break;
-
-          case "🔊":
-            reaction.users.remove(user).catch(console.error);
-            if (queue.volume == 100) return;
-            if (!canModifyQueue(member)) return i18n.__("common.errorNotChannel");
-            queue.volume = Math.min(queue.volume + 10, 100);
-            queue.connection.dispatcher.setVolumeLogarithmic(queue.volume / 100);
-            queue.textChannel
-              .send(i18n.__mf("play.increasedVolume", { author: user, volume: queue.volume }))
-              .catch(console.error);
-            break;
-
-          case "🔁":
-            reaction.users.remove(user).catch(console.error);
-            if (!canModifyQueue(member)) return i18n.__("common.errorNotChannel");
-            queue.loop = !queue.loop;
-            queue.textChannel
-              .send(
-                i18n.__mf("play.loopSong", {
-                  author: user,
-                  loop: queue.loop ? i18n.__("common.on") : i18n.__("common.off")
-                })
-              )
-              .catch(console.error);
-            break;
-
-          case "🔀":
-            reaction.users.remove(user).catch(console.error);
-            if (!canModifyQueue(member)) return i18n.__("common.errorNotChannel");
-
-            let songs = queue.songs;
-            for (let i = songs.length - 1; i > 1; i--) {
-              let j = 1 + Math.floor(Math.random() * i);
-              [songs[i], songs[j]] = [songs[j], songs[i]];
-            }
-            queue.songs = songs;
-
-            queue.textChannel.send(i18n.__mf("shuffle.result", { author: user })).catch(console.error);
-            break;
-
-          case "⏹":
-            reaction.users.remove(user).catch(console.error);
-            if (!canModifyQueue(member)) return i18n.__("common.errorNotChannel");
-            queue.songs = [];
-            queue.textChannel.send(i18n.__mf("play.stopSong", { author: user })).catch(console.error);
-            try {
-              queue.connection.dispatcher.end();
-            } catch (error) {
-              console.error(error);
-              queue.connection.disconnect();
-            }
-            collector.stop();
-            break;
-
-          default:
-            reaction.users.remove(user).catch(console.error);
-            break;
+        if (!results.length) {
+          message.reply(i18n.__("play.songNotFound")).catch(console.error);
+          return;
         }
-      });
 
-      collector.on("end", () => {
-        playingMessage.reactions.removeAll().catch(console.error);
-        if (PRUNING && playingMessage && !playingMessage.deleted) {
-          playingMessage.delete({ timeout: 3000 }).catch(console.error);
+        songInfo = await ytdl.getInfo(results[0].url);
+        song = {
+          title: songInfo.videoDetails.title,
+          url: songInfo.videoDetails.video_url,
+          duration: songInfo.videoDetails.lengthSeconds
+        };
+      } catch (error) {
+        console.error(error);
+        
+        if (error.message.includes("410")) {
+          return message.reply(i18n.__("play.songAccessErr")).catch(console.error);
+        } else {
+          return message.reply(error.message).catch(console.error);
         }
-      });
+      }
+    }
+
+    if (serverQueue) {
+      serverQueue.songs.push(song);
+      return serverQueue.textChannel
+        .send(i18n.__mf("play.queueAdded", { title: song.title, author: message.author }))
+        .catch(console.error);
+    }
+
+    queueConstruct.songs.push(song);
+    message.client.queue.set(message.guild.id, queueConstruct);
+
+    try {
+      queueConstruct.connection = await channel.join();
+      await queueConstruct.connection.voice.setSelfDeaf(true);
+      play(queueConstruct.songs[0], message);
+    } catch (error) {
+      console.error(error);
+      message.client.queue.delete(message.guild.id);
+      await channel.leave();
+      return message.channel.send(i18n.__mf("play.cantJoinChannel", { error: error })).catch(console.error);
     }
   }
 };
