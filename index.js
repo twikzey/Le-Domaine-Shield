@@ -33,7 +33,7 @@ client.on("warn", (info) => console.log(info));
 client.on("error", console.error);
 
 client.on('guildMemberAdd', (member ) => {
-  let welcomeChannel = client.channels.cache.get('969284601132499044');
+  let welcomeChannel = client.channels.cache.get('');
   welcomeChannel.send('**Bienvenue**, <@' +  member.id  +    '>** sur ʟᴇ ᴅᴏᴍᴀɪɴᴇ je t invite à regarder le reglement ici : <#906674909994971276>**');
 });
 
